@@ -1,0 +1,3 @@
+{ "name": "gravity-flip", "version": "1.0.0", "type": "module", "private": true,
+  "scripts": { "start": "npx serve .", "dev": "npx serve ." },
+  "description": "GRAVITY//FLIP - neon gravity-switching endless runner (Phaser 3, static, Vercel-ready)" }
