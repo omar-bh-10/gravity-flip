@@ -1,1 +1,15 @@
-{"name":"gravity-flip","version":"1.0.0","type":"module","private":true,"scripts":{"start":"npx serve .","dev":"npx serve ."},"description":"GRAVITY//FLIP - neon gravity-switching endless runner (Phaser 3, static, Vercel-ready)","devDependencies":{"vite":"^8.3.5"}}
+{
+  "name": "gravity-flip",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "description": "GRAVITY//FLIP - neon gravity-switching endless runner (Phaser 3, static, Vercel-ready)",
+  "devDependencies": {
+    "vite": "^8.3.5"
+  }
+}
