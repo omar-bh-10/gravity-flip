@@ -61,6 +61,10 @@ class AudioManager {
     if (n === 'warn') { this.tone(880, .09, 'square', .07); this.tone(880, .09, 'square', .07, 0, .14); }
     if (n === 'lock') { this.tone(1500, .05, 'square', .06); this.tone(1100, .08, 'square', .06, 0, .07); }
     if (n === 'boom') this.tone(200, .3, 'sawtooth', .09, -150);
+    if (n === 'fire') { this.tone(520, .16, 'sawtooth', .05, -330); this.tone(900, .1, 'square', .03, -500); }
+    if (n === 'break') this.tone(320, .12, 'square', .06, -220);
+    if (n === 'explode') { this.tone(90, .5, 'sawtooth', .14, -60); this.tone(220, .3, 'square', .08, -160); }
+    if (n === 'portal') this.tone(300, .25, 'triangle', .08, 600);
     if (n === 'deny') this.tone(140, .2, 'square', .06);
   }
   // One bar (3.2s) of bass + kick + arpeggio, rescheduled forever; chord roots cycle each bar.
@@ -225,45 +229,79 @@ function makeTrail(s, ch) {
 const makeBoom = (s, ch) => s.add.particles(0, 0, 'dot', { lifespan: { min: 400, max: 900 }, speed: { min: 120, max: 560 }, scale: { start: 1.3, end: 0 }, alpha: { start: 1, end: 0 }, color: [0xffffff, ch.c1, ch.c1], blendMode: 'ADD', emitting: false });
 
 // ---- objects/Obstacle ----
-// side: 1 = floor, -1 = ceiling. kinds: spike | block | mover (vertical sweeping hazard).
-const ob = (k, x, side, w, h, ph = 0) => ({ k, x, side, w, h, ph, y: 0 });
+// side: 1 = floor lane, -1 = ceiling lane, 0 = full height.
+// kinds: spike | block | mover (vertical sweeper) | crate (ice, burnable) | barrel (explosive) | rail (blinking laser) | patrol (sliding saw) | portal (forces a gravity flip)
+const ob = (k, x, side, w, h, ph = 0) => ({ k, x, side, w, h, ph, y: 0, dx: 0, on: false, warn: false, dead: false, used: false, padL: 0, padR: 0 });
 function updateObstacle(o, t) {
   if (o.k === 'mover') o.y = (CEIL + FLOOR) / 2 + Math.sin(t * 2.2 + o.ph) * ((FLOOR - CEIL) / 2 - 20);
+  else if (o.k === 'patrol') o.dx = Math.sin(t * 3 + o.ph) * 70;
+  else if (o.k === 'rail') { const c = (t + o.ph) % 1.6; o.on = c < .8; o.warn = c >= 1.2; } // ON .8s, off .4s, flickering warning .4s
 }
-// Forgiving hitboxes: spikes use a narrower/shorter box than they look.
-function box(o) {
-  if (o.k === 'block') return { x: o.x, y: o.side === 1 ? FLOOR - o.h : CEIL, w: o.w, h: o.h };
-  const sh = o.h * .7;
-  return { x: o.x + o.w * .25, y: o.side === 1 ? FLOOR - sh : CEIL, w: o.w * .5, h: sh };
+// Forgiving collision boxes (spikes are narrower than they look). null = not solid.
+function hitbox(o) {
+  const up = o.side === 1;
+  if (o.k === 'block' || o.k === 'crate' || o.k === 'barrel') return { x: o.x, y: up ? FLOOR - o.h : CEIL, w: o.w, h: o.h };
+  if (o.k === 'rail') return { x: o.x, y: up ? FLOOR - 26 : CEIL, w: o.w, h: 26 };
+  if (o.k === 'patrol') return { x: o.x + o.dx + 4, y: up ? FLOOR - 28 : CEIL, w: o.w - 8, h: 28 };
+  if (o.k === 'spike') { const sh = o.h * .7; return { x: o.x + o.w * .25, y: up ? FLOOR - sh : CEIL, w: o.w * .5, h: sh }; }
+  return null;
+}
+// x-range (px) this obstacle can ever threaten (used by the fairness checks)
+function hazardSpan(o) {
+  if (o.k === 'spike') return [o.x + o.w * .25, o.x + o.w * .75];
+  if (o.k === 'patrol') return [o.x - 66, o.x + o.w + 66];
+  if (o.k === 'portal') return [o.x - o.padL, o.x + o.w + o.padR];
+  return [o.x, o.x + o.w];
 }
 function collides(o, r) {
+  if (o.dead || o.k === 'portal') return false;
   if (o.k === 'mover') { // circle vs rect
     const cx = o.x + 16, nx = Math.max(r.x, Math.min(cx, r.x + r.w)), ny = Math.max(r.y, Math.min(o.y, r.y + r.h));
     return (cx - nx) ** 2 + (o.y - ny) ** 2 < 169;
   }
-  const b = box(o);
-  return r.x < b.x + b.w && r.x + r.w > b.x && r.y < b.y + b.h && r.y + r.h > b.y;
+  if (o.k === 'rail' && !o.on) return false;
+  const b = hitbox(o); return r.x < b.x + b.w && r.x + r.w > b.x && r.y < b.y + b.h && r.y + r.h > b.y;
 }
-function drawObstacle(g, o) {
+function drawObstacle(g, o, t = 0) {
+  if (o.dead) return;
+  const up = o.side === 1, y0 = up ? FLOOR : CEIL, dir = up ? -1 : 1, top = up ? FLOOR - o.h : CEIL, p = .5 + .5 * Math.sin(t * 8);
   if (o.k === 'mover') {
-    const cx = o.x + 16;
-    g.lineStyle(1, C.red, .25).lineBetween(cx, CEIL, cx, FLOOR);
+    const cx = o.x + 16; g.lineStyle(1, C.red, .25).lineBetween(cx, CEIL, cx, FLOOR);
     for (let i = 3; i > 0; i--) g.fillStyle(C.red, .08 * i).fillCircle(cx, o.y, 16 + i * 5);
     g.fillStyle(C.red, 1).fillCircle(cx, o.y, 13); g.fillStyle(0xffffff, 1).fillCircle(cx, o.y, 5);
-    return;
+  } else if (o.k === 'block') {
+    g.fillStyle(C.purple, .15).fillRect(o.x - 6, top - 6, o.w + 12, o.h + 12); g.fillStyle(0x1a1030, 1).fillRect(o.x, top, o.w, o.h); g.lineStyle(2, C.purple, 1).strokeRect(o.x, top, o.w, o.h);
+  } else if (o.k === 'crate') { // frozen crate: cracked ice with a flame hint -> burn it
+    const cx = o.x + o.w / 2, cy = top + o.h / 2;
+    g.fillStyle(0x7dd3fc, .16).fillRect(o.x - 6, top - 6, o.w + 12, o.h + 12); g.fillStyle(0x0c2a3d, 1).fillRect(o.x, top, o.w, o.h); g.lineStyle(2, 0x7dd3fc, 1).strokeRect(o.x, top, o.w, o.h);
+    g.lineStyle(1, 0xbfe9ff, .7).lineBetween(o.x + 6, top + 8, cx, cy).lineBetween(cx, cy, o.x + o.w - 8, top + o.h - 10).lineBetween(cx, cy, o.x + o.w - 6, top + 10);
+    g.fillStyle(0xFF8A00, .5 + .4 * p).fillTriangle(cx - 6, cy + 8, cx, cy - 9, cx + 6, cy + 8);
+  } else if (o.k === 'barrel') { // explosive barrel: pulses, hazard stripes
+    g.fillStyle(0xFF5A1F, .12 + .1 * p).fillCircle(o.x + o.w / 2, top + o.h / 2, 34);
+    g.fillStyle(0x8a2a0c, 1).fillRoundedRect(o.x, top, o.w, o.h, 7); g.lineStyle(2, 0xFFB300, 1).strokeRoundedRect(o.x, top, o.w, o.h, 7);
+    g.lineStyle(3, 0xFFD23F, 1).lineBetween(o.x + 2, top + 12, o.x + o.w - 2, top + 12).lineBetween(o.x + 2, top + o.h - 12, o.x + o.w - 2, top + o.h - 12);
+    g.fillStyle(0xFFE0A0, 1).fillRect(o.x + o.w / 2 - 2, top + o.h / 2 - 7, 4, 9).fillCircle(o.x + o.w / 2, top + o.h / 2 + 7, 2.5);
+  } else if (o.k === 'rail') { // laser rail between two emitters: ON / off / flickering warning
+    const y = up ? FLOOR - 13 : CEIL + 13, x0 = o.x, x1 = o.x + o.w;
+    if (o.on) { g.lineStyle(16, C.red, .22).lineBetween(x0, y, x1, y); g.lineStyle(7, C.red, .9).lineBetween(x0, y, x1, y); g.lineStyle(2, 0xffffff, 1).lineBetween(x0, y + Math.sin(t * 90), x1, y); }
+    else if (o.warn) g.lineStyle(2, C.red, Math.sin(t * 60) > 0 ? .8 : .15).lineBetween(x0, y, x1, y);
+    else g.lineStyle(1, C.red, .22).lineBetween(x0, y, x1, y);
+    g.fillStyle(0x3a0a2a, 1).fillRect(x0 - 6, y - 17, 9, 34).fillRect(x1 - 3, y - 17, 9, 34);
+    g.fillStyle(o.on ? 0xffffff : o.warn ? 0xFF3366 : 0x7a2a4a, 1).fillCircle(x0 - 1.5, y, 4).fillCircle(x1 + 1.5, y, 4);
+  } else if (o.k === 'patrol') { // spinning saw sliding back and forth on a track
+    const cx = o.x + o.dx + 16, cy = up ? FLOOR - 14 : CEIL + 14, a = t * 14;
+    g.lineStyle(2, C.purple, .45).lineBetween(o.x - 50, up ? FLOOR - 2 : CEIL + 2, o.x + 82, up ? FLOOR - 2 : CEIL + 2);
+    g.fillStyle(C.red, .15).fillCircle(cx, cy, 24);
+    for (let i = 0; i < 8; i++) { const an = a + i * .785; g.fillStyle(0xff9ab0, 1).fillTriangle(cx + Math.cos(an - .2) * 13, cy + Math.sin(an - .2) * 13, cx + Math.cos(an) * 20, cy + Math.sin(an) * 20, cx + Math.cos(an + .2) * 13, cy + Math.sin(an + .2) * 13); }
+    g.fillStyle(0x2a0a18, 1).fillCircle(cx, cy, 13); g.lineStyle(2, C.red, 1).strokeCircle(cx, cy, 13); g.fillStyle(0xffffff, 1).fillCircle(cx, cy, 3);
+  } else if (o.k === 'portal') { // flip gate: ring spanning the whole height, arrows up/down
+    const mid = (CEIL + FLOOR) / 2, al = o.used ? .25 : 1, w = 34 + 6 * Math.sin(t * 6);
+    g.lineStyle(10, C.cyan, .15 * al).strokeEllipse(o.x + 10, mid, w, FLOOR - CEIL); g.lineStyle(3, C.cyan, al).strokeEllipse(o.x + 10, mid, w, FLOOR - CEIL); g.lineStyle(2, C.purple, al).strokeEllipse(o.x + 10, mid, w * .6, FLOOR - CEIL - 20);
+    g.fillStyle(0xffffff, al).fillTriangle(o.x + 10, mid - 40, o.x + 2, mid - 24, o.x + 18, mid - 24).fillTriangle(o.x + 10, mid + 40, o.x + 2, mid + 24, o.x + 18, mid + 24);
+  } else { // spike
+    const a = [o.x, y0, o.x + o.w / 2, y0 + dir * o.h, o.x + o.w, y0];
+    g.fillStyle(C.red, .2).fillTriangle(a[0] - 7, y0, a[2], a[3] + dir * 10, a[4] + 7, y0); g.fillStyle(0x2a0a18, 1).fillTriangle(...a); g.lineStyle(2, C.red, 1).strokeTriangle(...a);
   }
-  const up = o.side === 1, y0 = up ? FLOOR : CEIL, dir = up ? -1 : 1;
-  if (o.k === 'block') {
-    const top = up ? FLOOR - o.h : CEIL;
-    g.fillStyle(C.purple, .15).fillRect(o.x - 6, top - 6, o.w + 12, o.h + 12);
-    g.fillStyle(0x1a1030, 1).fillRect(o.x, top, o.w, o.h);
-    g.lineStyle(2, C.purple, 1).strokeRect(o.x, top, o.w, o.h);
-    return;
-  }
-  const a = [o.x, y0, o.x + o.w / 2, y0 + dir * o.h, o.x + o.w, y0];
-  g.fillStyle(C.red, .2).fillTriangle(a[0] - 7, y0, a[2], a[3] + dir * 10, a[4] + 7, y0);
-  g.fillStyle(0x2a0a18, 1).fillTriangle(...a);
-  g.lineStyle(2, C.red, 1).strokeTriangle(...a);
 }
 
 // ---- objects/Collectible ----
@@ -281,8 +319,8 @@ const laneY = l => (l === 1 ? FLOOR - HALF : CEIL + HALF);
 const TYPE_COL = { scout: 0x00F5FF, hunter: 0xA855F7, destroyer: 0xFF3366, phantom: 0x9D6BFF };
 // r = hit radius (slightly smaller than the art), base/cap = approach speed px/s, warn = warning time before it enters
 const DEF = {
-  scout: { r: 13, base: 330, cap: 520, warn: 1.0 }, hunter: { r: 15, base: 420, cap: 620, warn: 1.1 },
-  destroyer: { r: 25, base: 540, cap: 780, warn: 1.2 }, phantom: { r: 14, base: 300, cap: 420, warn: 1.2 },
+  scout: { hp: 1, score: 60, coins: 1, r: 13, base: 330, cap: 520, warn: 1.0 }, hunter: { hp: 2, score: 100, coins: 2, r: 15, base: 420, cap: 620, warn: 1.1 },
+  destroyer: { hp: 3, score: 200, coins: 4, r: 25, base: 540, cap: 780, warn: 1.2 }, phantom: { hp: 2, score: 150, coins: 2, r: 14, base: 300, cap: 420, warn: 1.2 },
 };
 const POOL = [];
 const hex = r => [0, 1, 2, 3, 4, 5].map(i => ({ x: Math.cos(i * 1.047) * r, y: Math.sin(i * 1.047) * r }));
@@ -293,7 +331,7 @@ class RobotEnemy {
   init(type, lane, mul, py, rng) {
     const d = DEF[type], ap = Math.min(d.cap, d.base * mul);
     Object.assign(this, { type, r: d.r, alive: true, lane, lane2: lane, state: 'warn', t: 0, anim: rng() * 6, warnLeft: d.warn, approach: ap,
-      x: SPAWN_X, vx: 0, vy: 0, alpha: 1, acc: 0, vt: 0, vanished: false, vanishX: 0, fresh: false, lockX: PX + ap * 1.05 + 40 });
+      x: SPAWN_X, vx: 0, vy: 0, alpha: 1, acc: 0, vt: 0, vanished: false, vanishX: 0, fresh: false, hp: d.hp, hurt: 0, lockX: PX + ap * 1.05 + 40 });
     this.y = type === 'hunter' ? Math.max(CEIL + HALF, Math.min(FLOOR - HALF, py)) : laneY(lane);
     if (type === 'phantom') { // plan: re-appear >= 1s of travel from the player, possibly in the other lane
       this.lane2 = rng() < .65 ? -lane : lane;
@@ -309,7 +347,7 @@ class RobotEnemy {
     const nx = Math.max(r.x, Math.min(this.x, r.x + r.w)), ny = Math.max(r.y, Math.min(this.y, r.y + r.h));
     return (this.x - nx) ** 2 + (this.y - ny) ** 2 < this.r * this.r;
   }
-  draw(g, t) { g.save(); g.translateCanvas(this.x, this.y); DRAWS[this.type](g, this, this.alpha, this.anim); g.restore(); }
+  draw(g, t) { g.save(); g.translateCanvas(this.x, this.y); DRAWS[this.type](g, this, this.alpha, this.anim); if (this.hurt > 0) g.fillStyle(0xffffff, .6).fillCircle(0, 0, this.r + 5); g.restore(); }
 }
 
 const DRAWS = {
@@ -395,7 +433,12 @@ const Difficulty = {
   robotMul(t) { return t < 120 ? interp(RMUL, t) : Math.min(1.9, 1.6 + (t - 120) * .0015); },
   robotSpacing(t) { return Math.max(1.1, 1.5 - t * .003); },   // min seconds between two robot arrivals
   unlocked(t) { return UNL.filter(u => t >= u[1]).map(u => u[0]); },
-  patterns(t) { const p = [0, 2]; if (t > 8) p.push(1); if (t > 15) p.push(3); if (t > 22) p.push(4); if (t > 32) p.push(5); if (t > 48) p.push(6); if (t > 70) p.push(7); return p; },
+  // pattern ids (see EnemySpawnManager.build): new, more unusual obstacles unlock over time; the plain ones fade out
+  patterns(t) {
+    const p = []; if (t < 75) p.push(0); if (t < 100) p.push(2); if (t > 8) p.push(1); if (t > 12) p.push(8); if (t > 15) p.push(3); if (t > 22) p.push(4);
+    if (t > 25) p.push(9); if (t > 30) p.push(5, 14); if (t > 38) p.push(10); if (t > 40) p.push(13); if (t > 48) p.push(6); if (t > 50) p.push(11);
+    if (t > 58) p.push(15); if (t > 62) p.push(12); if (t > 70) p.push(7); return p;
+  },
 };
 
 // ---- systems/RobotAI ----
@@ -403,7 +446,7 @@ const Difficulty = {
 // SCOUT/DESTROYER: straight along a lane.  HUNTER: tracks the player's height, then LOCKS a lane and dashes.
 // PHANTOM: vanishes, then re-appears (maybe in the other lane) with >= 1s of warning.
 function updateRobot(rb, dt, c) {
-  rb.t += dt; rb.anim += dt;
+  rb.t += dt; rb.anim += dt; rb.hurt = Math.max(0, rb.hurt - dt);
   if (rb.type === 'hunter' && (rb.state === 'warn' || rb.state === 'fly')) { const d = c.py - rb.y; rb.y += Math.sign(d) * Math.min(Math.abs(d), 300 * dt); }
   if (rb.state === 'warn') { rb.warnLeft -= dt; if (rb.warnLeft <= 0) { rb.state = 'fly'; rb.vx = -rb.approach; } return; }
   rb.x += rb.vx * dt; rb.y += rb.vy * dt;
@@ -451,7 +494,7 @@ function trail(rb, dt, fx) { // unique particle trail per robot
 // and obstacles are only generated if they don't violate the same rule for robots already on the field.
 const pass = (a, f) => { let n = 0; for (const x of a) if (f(x)) a[n++] = x; a.length = n; };
 // time window (seconds from now) during which obstacle o overlaps the player column
-const winOf = (o, sp) => { const s = o.k === 'spike', bx = s ? o.x + o.w * .25 : o.x, bw = s ? o.w * .5 : o.w; return [(bx - (PX + HALF)) / sp, (bx + bw - (PX - HALF)) / sp]; };
+const winOf = (o, sp) => { const [a, b] = hazardSpan(o); return [(a - (PX + HALF)) / sp, (b - (PX - HALF)) / sp]; };
 
 class EnemySpawnManager {
   constructor(rng = Math.random) { this.rng = rng; this.robots = []; this.obs = []; this.orbs = []; this.reset(); }
@@ -461,17 +504,30 @@ class EnemySpawnManager {
   }
   update(dt, t, speed, ctx) {
     const dx = speed * dt; this.nextX -= dx;
-    for (const o of this.obs) { o.x -= dx; updateObstacle(o, t); } for (const o of this.orbs) o.x -= dx;
+    for (const o of this.obs) { o.x -= dx; updateObstacle(o, t); if (o.k === 'portal' && !o.used && o.x <= PX) { o.used = true; ctx.onPortal(o); } }
+    for (const o of this.orbs) o.x -= dx;
     for (let i = this.robots.length - 1; i >= 0; i--) {
       const rb = this.robots[i]; updateRobot(rb, dt, ctx);
       if (rb.state !== 'warn' && rb.x < PX - 90) { ctx.onPass(rb); RobotEnemy.release(rb); this.robots.splice(i, 1); } // dodged: robot burns out
     }
     this.spawnRobot(t, speed, ctx);
     for (let n = 0; this.nextX < W + 200 && n < 8; n++) this.spawnObstacle(t, speed);
-    pass(this.obs, o => o.x + o.w > -60); pass(this.orbs, o => o.x > -40 && !o.got);
+    pass(this.obs, o => !o.dead && o.x + o.w + o.padR > -140); pass(this.orbs, o => o.x > -40 && !o.got);
   }
   hitsRobot(r) { return this.robots.find(rb => rb.hits(r)); }
+  killRobot(rb) { const i = this.robots.indexOf(rb); if (i >= 0) this.robots.splice(i, 1); RobotEnemy.release(rb); }
+  // barrel explosion: destroys every obstacle within 140px (chains into other barrels) and damages robots nearby
+  blast(o, c) {
+    const q = [o];
+    while (q.length) {
+      const b = q.pop(); if (b.dead) continue; b.dead = true;
+      const cx = b.x + b.w / 2, cy = b.side === 1 ? FLOOR - b.h / 2 : CEIL + b.h / 2; c.onExplode(cx, cy);
+      for (const p of this.obs) if (!p.dead && p.k !== 'portal' && Math.abs(p.x + p.w / 2 - cx) <= 140) { if (p.k === 'barrel') q.push(p); else { p.dead = true; c.onBreak(p); } }
+      for (const rb of this.robots.slice()) if (rb.lethal && rb.x < W && Math.hypot(rb.x - cx, rb.y - cy) < 190) { rb.hp -= 2; rb.hurt = .15; if (rb.hp <= 0) { this.killRobot(rb); c.onKill(rb); } }
+    }
+  }
   conflict(rb, o, arr, sp) {
+    if (o.dead) return false;
     if (o.k !== 'mover' && !rb.unknownLane() && o.side === rb.lane) return false; // obstacle in the robot's own lane: player is in the other lane anyway
     const [a, b] = winOf(o, sp); return b > arr - .85 && a < arr + 1.0;             // else it must clear before the player has to flee (flip ~0.4s) and not follow too soon
   }
@@ -488,16 +544,25 @@ class EnemySpawnManager {
     rb.fresh = !this.seen.has(type); this.seen.add(type); this.robots.push(rb);
     this.nextRobot = t + Difficulty.robotInterval(t) * (.8 + .4 * rng()); ctx.onWarn(rb, false);
   }
+  // Obstacle patterns. Every pattern is dodgeable by lane-switching alone (fire is optional). Spacing between lane changes >= 0.72s of travel.
   build(p, x, side, sp) {
-    const O = [], gp = sp * .8; let w = 40;
-    if (p === 0) O.push(ob('spike', x, side, 40, 40));
-    else if (p === 1) { O.push(ob('spike', x, side, 40, 40), ob('spike', x + 40, side, 40, 40)); w = 80; }
-    else if (p === 2) { O.push(ob('block', x, side, 56, 60 + (this.rng() * 60 | 0))); w = 56; }
-    else if (p === 3) { for (let i = 0; i < 3; i++) O.push(ob('spike', x + i * 40, side, 40, 40)); w = 120; }
-    else if (p === 4) { O.push(ob('mover', x, 1, 32, 0, this.rng() * 6.3)); w = 32; }
-    else if (p === 5) { const g = sp * .72; O.push(ob('spike', x, side, 40, 40), ob('block', x + 40 + g, -side, 50, 70)); w = 90 + g; }
-    else if (p === 6) { O.push(ob('spike', x, side, 40, 40), ob('spike', x + 40 + gp, -side, 40, 40)); w = 80 + gp; }
-    else { for (let i = 0; i < 3; i++) O.push(ob('spike', x + i * (40 + gp), i % 2 ? -side : side, 40, 40)); w = 120 + 2 * gp; }
+    const O = [], gp = sp * .8, mk = (...a) => O.push(ob(...a)); let w = 40;
+    if (p === 0) mk('spike', x, side, 40, 40);
+    else if (p === 1) { mk('spike', x, side, 40, 40); mk('spike', x + 40, side, 40, 40); w = 80; }
+    else if (p === 2) { mk('block', x, side, 56, 60 + (this.rng() * 60 | 0)); w = 56; }
+    else if (p === 3) { for (let i = 0; i < 3; i++) mk('spike', x + i * 40, side, 40, 40); w = 120; }
+    else if (p === 4) { mk('mover', x, 1, 32, 0, this.rng() * 6.3); w = 32; }
+    else if (p === 5) { const g = sp * .72; mk('spike', x, side, 40, 40); mk('block', x + 40 + g, -side, 50, 70); w = 90 + g; }
+    else if (p === 6) { mk('spike', x, side, 40, 40); mk('spike', x + 40 + gp, -side, 40, 40); w = 80 + gp; }
+    else if (p === 7) { for (let i = 0; i < 3; i++) mk('spike', x + i * (40 + gp), i % 2 ? -side : side, 40, 40); w = 120 + 2 * gp; }
+    else if (p === 8) { mk('crate', x, side, 44, 56); w = 44; }                                                              // ice crate (burn it or dodge it)
+    else if (p === 9) { w = 200 + (this.rng() * 80 | 0); mk('rail', x, side, w, 26, this.rng() * 1.6); }                    // blinking laser rail
+    else if (p === 10) { mk('patrol', x + 70, side, 32, 28, this.rng() * 6.3); w = 172; }                                    // sliding saw
+    else if (p === 11) { mk('barrel', x, side, 36, 44); w = 36; }                                                            // explosive barrel
+    else if (p === 12) { const q = ob('portal', x, 0, 20, 0); q.padL = sp * .3; q.padR = sp * .8; O.push(q); w = 20; }       // flip gate (quiet zone around it)
+    else if (p === 13) { const L = 200; mk('rail', x, side, L, 26, this.rng() * 1.6); mk('spike', x + L + gp, -side, 40, 40); w = L + gp + 40; } // rail then spike on the other lane
+    else if (p === 14) { mk('crate', x, side, 44, 56); mk('crate', x + 44 + gp, -side, 44, 56); w = 88 + gp; }               // ice corridor: zig-zag or burn through
+    else { mk('barrel', x, side, 36, 44); for (let i = 0; i < 3; i++) mk('spike', x + 70 + i * 40, side, 40, 40); w = 190; } // powder keg: blow up the spikes
     return { O, w };
   }
   valid(list, sp) {
@@ -506,13 +571,54 @@ class EnemySpawnManager {
   spawnObstacle(t, sp) {
     const pats = Difficulty.patterns(t), rng = this.rng, gap = sp * Difficulty.gap(t);
     for (let k = 0; k < 5; k++) {
-      const p = pats[rng() * pats.length | 0], pad = p === 4 ? sp * .5 : 0, x = this.nextX + pad, { O, w } = this.build(p, x, rng() < .5 ? 1 : -1, sp); // movers get extra room before/after
+      const p = pats[rng() * pats.length | 0], pre = p === 4 ? sp * .5 : p === 12 ? sp * .3 : 0, post = p === 4 ? sp * .5 : p === 12 ? sp * .8 : 0; // extra room around movers/gates
+      const x = this.nextX + pre, { O, w } = this.build(p, x, rng() < .5 ? 1 : -1, sp);
       if (!this.valid(O, sp)) continue;
       this.obs.push(...O);
-      if (rng() < .75) { const q = rng(), y = q < .33 ? FLOOR - 34 : q < .66 ? CEIL + 34 : (FLOOR + CEIL) / 2; for (let i = -1; i <= 1; i++) this.orbs.push({ x: x + w + gap / 2 + i * 44, y: y + (q >= .66 ? i * 30 : 0) }); }
-      this.nextX = x + w + gap + pad; return;
+      if (p === 12) for (let i = -1; i <= 1; i++) this.orbs.push({ x: x + 10, y: (FLOOR + CEIL) / 2 + i * 70 });
+      else if (rng() < .75) { const q = rng(), y = q < .33 ? FLOOR - 34 : q < .66 ? CEIL + 34 : (FLOOR + CEIL) / 2; for (let i = -1; i <= 1; i++) this.orbs.push({ x: x + w + gap / 2 + i * 44, y: y + (q >= .66 ? i * 30 : 0) }); }
+      this.nextX = x + w + gap + post; return;
     }
     this.nextX += 150; // nothing fits right now (a robot needs the space): leave a gap and retry shortly
+  }
+}
+
+// ---- systems/FireSystem ----
+// Player fireballs. 3 charges (regen 1 per 3.5s, +0.2 per orb). A fireball: burns robots (hp), melts ice crates,
+// detonates barrels (chain explosion), is absorbed by solid blocks, flies over spikes/rails/saws.
+const MAX = 3, R = 9;
+class FireSystem {
+  constructor() { this.balls = []; this.free = []; this.reset(); }
+  reset() { this.free.push(...this.balls); this.balls.length = 0; this.charges = MAX; this.cd = 0; }
+  fire(y) {
+    if (this.charges < 1 || this.cd > 0) return false;
+    this.charges -= 1; this.cd = .22; const b = this.free.pop() || {}; b.x = PX + HALF + 4; b.y = y; b.vx = 1000; this.balls.push(b); return true;
+  }
+  addCharge(n) { this.charges = Math.min(MAX, this.charges + n); }
+  update(dt, mgr, c) { // c = { fx, onFireHit, onKill, onBreak, onExplode, onSpark }
+    this.charges = Math.min(MAX, this.charges + dt / 3.5); this.cd -= dt;
+    let n = 0;
+    for (const b of this.balls) {
+      b.x += b.vx * dt; c.fx(b.x - 8, b.y + (Math.random() - .5) * 6, -90, (Math.random() - .5) * 70, .25, Math.random() < .5 ? 0xFF8A00 : 0xFFD23F, 3);
+      let used = b.x > W + 40;
+      if (!used) for (const rb of mgr.robots) if (rb.lethal && rb.x < W - 8 && Math.hypot(rb.x - b.x, rb.y - b.y) < rb.r + R) {
+        rb.hp--; rb.hurt = .12; c.onFireHit(rb); if (rb.hp <= 0) { mgr.killRobot(rb); c.onKill(rb); } used = true; break;
+      }
+      if (!used) for (const o of mgr.obs) {
+        if (o.dead || (o.k !== 'crate' && o.k !== 'barrel' && o.k !== 'block')) continue;
+        const h = hitbox(o); if (b.x + R < h.x || b.x - R > h.x + h.w || b.y + R < h.y || b.y - R > h.y + h.h) continue;
+        if (o.k === 'crate') { o.dead = true; c.onBreak(o); } else if (o.k === 'barrel') mgr.blast(o, c); else c.onSpark(b.x, b.y);
+        used = true; break;
+      }
+      if (used) this.free.push(b); else this.balls[n++] = b;
+    }
+    this.balls.length = n;
+  }
+  draw(g) {
+    for (const b of this.balls) {
+      g.lineStyle(7, 0xFF8A00, .35).lineBetween(b.x - 28, b.y, b.x, b.y);
+      g.fillStyle(0xFF4400, .2).fillCircle(b.x, b.y, 17); g.fillStyle(0xFF8A00, .6).fillCircle(b.x, b.y, 11); g.fillStyle(0xFFD23F, 1).fillCircle(b.x, b.y, 7); g.fillStyle(0xffffff, 1).fillCircle(b.x + 1, b.y, 3);
+    }
   }
 }
 
@@ -569,8 +675,8 @@ class MenuScene extends Phaser.Scene {
     const c = this.add.container(0, 0).setDepth(20);
     const dim = this.add.rectangle(W / 2, H / 2, W, H, 0, .85).setInteractive();
     const g = this.add.graphics().fillStyle(0x12122a, 1).fillRoundedRect(180, 70, 600, 400, 16).lineStyle(2, C.cyan, 1).strokeRoundedRect(180, 70, 600, 400, 16);
-    const L = ['HOW TO PLAY', '', 'SPACE / CLICK / TAP  =  FLIP GRAVITY', '', 'Your cube runs automatically.', 'Flip between floor and ceiling', 'to dodge spikes, blocks and red orbs.', 'Collect ◆ orbs to unlock skins.', 'Survive longer for a bigger multiplier.', '', 'After 15s, robots hunt you: RED WARNING = switch lane!', 'One hit = game over.'];
-    const t = txt(this, W / 2, 255, L.join('\n'), 18, '#ffffff').setLineSpacing(8);
+    const L = ['HOW TO PLAY', '', 'SPACE / CLICK / TAP  =  FLIP GRAVITY', '', 'Your cube runs automatically.', 'Flip between floor and ceiling', 'to dodge spikes, blocks and red orbs.', 'Collect ◆ orbs to unlock skins.', 'Survive longer for a bigger multiplier.', '', 'F / RIGHT-CLICK / FIRE BUTTON = FIREBALL (3 charges)', 'Burn robots, ice crates and explosive barrels!', 'After 15s, robots hunt you: RED WARNING = switch lane!', 'One hit = game over.'];
+    const t = txt(this, W / 2, 255, L.join('\n'), 15, '#ffffff').setLineSpacing(6);
     const close = btn(this, W / 2, 430, 'CLOSE', () => { this.helpOpen = false; c.destroy(true); }, 200);
     c.add([dim, g, t, close]);
   }
@@ -687,7 +793,10 @@ class GameScene extends Phaser.Scene {
       alive: true, parts: [], free: this.free || [], skin: SKINS[Save.data.skin], warning: false });
     this.t = parseFloat(new URLSearchParams(location.search).get('t')) || 0; // test shortcut: index.html?t=40 starts at 40s
     if (!this.mgr) this.mgr = new EnemySpawnManager(); this.mgr.reset();
-    this.aic = { py: this.py, gdir: 1, fx: (...a) => this.pfx(...a), onWarn: (rb, relock) => this.onWarn(rb, relock), onPass: rb => this.onPass(rb) };
+    if (!this.fire) this.fire = new FireSystem(); this.fire.reset();
+    this.aic = { py: this.py, gdir: 1, fx: (...a) => this.pfx(...a), onWarn: (rb, relock) => this.onWarn(rb, relock), onPass: rb => this.onPass(rb),
+      onPortal: () => this.onPortal(), onFireHit: rb => { AudioM.sfx('break'); this.burst(rb.x, rb.y, 6, 0xFF8A00, 200); }, onKill: rb => this.onKill(rb),
+      onBreak: o => this.onBreak(o), onExplode: (x, y) => this.onExplode(x, y), onSpark: (x, y) => this.burst(x, y, 5, 0xFF8A00, 140) };
     this.cameras.main.fadeIn(200); makeTextures(this);
     this.bg = this.add.graphics().setDepth(-1);
     this.trail = makeTrail(this, this.skin); this.boom = makeBoom(this, this.skin); // created before g so they draw behind
@@ -699,13 +808,31 @@ class GameScene extends Phaser.Scene {
     this.hudM = this.add.text(W / 2, 18, '', { ...st, fontSize: '18px', color: '#A855F7' }).setOrigin(.5, 0).setDepth(10);
     this.hint = this.add.text(W / 2, H / 2, 'SPACE / CLICK / TAP  =  FLIP', { ...st, fontSize: '22px', color: '#8b8bd0' }).setOrigin(.5);
     this.banner = this.add.text(W / 2, 100, '', { ...st, fontSize: '22px', color: '#FF3366' }).setOrigin(.5).setAlpha(0).setDepth(10).setShadow(0, 0, '#FF3366', 12, true, true);
-    this.input.on('pointerdown', () => this.flip());
+    if (this.input.mouse) this.input.mouse.disableContextMenu();
+    this.fireZone = this.add.zone(56, 510, 100, 100).setInteractive({ useHandCursor: true }).on('pointerdown', () => this.shoot()); // on-screen FIRE button
+    this.input.on('pointerdown', (p, over) => { if (p.rightButtonDown()) return this.shoot(); if (!over.length) this.flip(); }); // left click/tap = flip, right click = fire
     this.input.keyboard.on('keydown-SPACE', e => { if (!e.repeat) this.flip(); });
+    ['F', 'X'].forEach(k => this.input.keyboard.on('keydown-' + k, e => { if (!e.repeat) this.shoot(); }));
     this.input.keyboard.on('keydown-ESC', () => this.scene.start('Menu'));
   }
   flip() {
     if (!this.alive) return;
     this.gdir *= -1; this.vy = this.gdir * 220; AudioM.sfx('flip'); this.burst(PX, this.py, 8, this.skin.c1, 260);
+  }
+  shoot() {
+    if (!this.alive) return;
+    if (this.fire.fire(this.py)) { AudioM.sfx('fire'); this.burst(PX + 22, this.py, 6, 0xFF8A00, 160); } else AudioM.sfx('deny');
+  }
+  pop(x, y, str, col) { const t = this.add.text(x, y, str, { fontFamily: F, fontSize: '18px', color: col, fontStyle: 'bold' }).setOrigin(.5).setDepth(10); this.tweens.add({ targets: t, y: y - 40, alpha: 0, duration: 700, onComplete: () => t.destroy() }); }
+  onKill(rb) { // robot burned: score + coins + explosion
+    const d = DEF[rb.type], pts = Math.round(d.score * ScoreManager.multiplier(this.t)); this.score += pts; this.coins += d.coins;
+    AudioM.sfx('boom'); this.cameras.main.shake(140, .006); this.burst(rb.x, rb.y, 40, TYPE_COL[rb.type], 420); this.burst(rb.x, rb.y, 14, 0xFFD23F, 300);
+    this.pop(rb.x, rb.y - 20, '+' + pts + '  ◆' + d.coins, '#FFD23F');
+  }
+  onBreak(o) { this.score += 15; AudioM.sfx('break'); this.burst(o.x + o.w / 2, o.side === 1 ? FLOOR - o.h / 2 : CEIL + o.h / 2, 14, o.k === 'crate' ? 0x7dd3fc : 0xFF8A00, 260); }
+  onExplode(x, y) { this.score += 30; AudioM.sfx('explode'); this.cameras.main.shake(220, .01); this.burst(x, y, 50, 0xFF5A1F, 520); this.burst(x, y, 20, 0xFFD23F, 380); }
+  onPortal() { // flip gate: gravity reverses
+    this.gdir *= -1; this.vy = this.gdir * 220; AudioM.sfx('portal'); this.cameras.main.flash(180, 0, 245, 255); this.burst(PX, this.py, 24, C.cyan, 380);
   }
   // pooled particles: reuse objects instead of allocating
   pfx(x, y, vx, vy, life, c, s) {
@@ -737,13 +864,13 @@ class GameScene extends Phaser.Scene {
     const grounded = (this.py === lo && this.gdir === 1) || (this.py === hi && this.gdir === -1);
     if (grounded) this.rot += (Math.round(this.rot / (Math.PI / 2)) * Math.PI / 2 - this.rot) * Math.min(1, dt * 20); else this.rot += this.gdir * dt * 7;
     // --- obstacles, orbs and robots (spawning, AI, fairness) ---
-    this.aic.py = this.py; this.aic.gdir = this.gdir; this.mgr.update(dt, t, speed, this.aic);
+    this.aic.py = this.py; this.aic.gdir = this.gdir; this.mgr.update(dt, t, speed, this.aic); this.fire.update(dt, this.mgr, this.aic);
     this.warning = this.mgr.robots.some(r => r.state === 'warn');
     // --- collisions (identical hitbox for every character) ---
     const r = { x: PX - HALF + 4, y: this.py - HALF + 4, w: HALF * 2 - 8, h: HALF * 2 - 8 };
     for (const o of this.mgr.obs) if (collides(o, r)) return this.die();
     const rb = this.mgr.hitsRobot(r); if (rb) return this.die(rb);
-    for (const o of this.mgr.orbs) if (Math.hypot(o.x - PX, o.y - this.py) < HALF + 16) { o.got = true; this.coins++; AudioM.sfx('coin'); this.burst(o.x, o.y, 10, C.cyan, 220); }
+    for (const o of this.mgr.orbs) if (Math.hypot(o.x - PX, o.y - this.py) < HALF + 16) { o.got = true; this.coins++; this.fire.addCharge(.2); AudioM.sfx('coin'); this.burst(o.x, o.y, 10, C.cyan, 220); }
     this.fl += (this.gdir - this.fl) * Math.min(1, dt * 18); this.trail.setPosition(PX - 10, this.py);
     if (this.skin.id === 'slime' && this.trail.setGravity) this.trail.setGravity(0, 900 * this.gdir);
     this.hint.setAlpha(Math.max(0, 1 - t / 2.5));
@@ -763,11 +890,18 @@ class GameScene extends Phaser.Scene {
     for (const y of [FLOOR, CEIL]) { g.lineStyle(10, C.purple, .15).lineBetween(0, y, W, y); g.lineStyle(3, C.purple, 1).lineBetween(0, y, W, y); }
     g.lineStyle(2, C.purple, .4);
     for (let i = 0; i < 17; i++) { const x = (((i * 60 - this.off) % W) + W) % W; g.lineBetween(x, FLOOR + 6, x, FLOOR + 14); g.lineBetween(x, CEIL - 6, x, CEIL - 14); }
-    this.mgr.obs.forEach(o => drawObstacle(g, o)); this.mgr.orbs.forEach(o => drawOrb(g, o.x, o.y, ck));
+    this.mgr.obs.forEach(o => drawObstacle(g, o, ck)); this.mgr.orbs.forEach(o => drawOrb(g, o.x, o.y, ck));
     if (this.warning) g.fillStyle(0xFF3366, .05 + .05 * Math.sin(ck * 14)).fillRect(W - 90, 0, 90, H); // edge flash while a robot is incoming
     this.mgr.robots.forEach(rb => drawWarning(g, rb, ck)); this.mgr.robots.forEach(rb => rb.draw(g, ck));
     for (const p of this.parts) g.fillStyle(p.c, Math.min(1, p.life)).fillRect(p.x - p.s / 2, p.y - p.s / 2, p.s, p.s);
+    this.fire.draw(g);
     if (this.alive) drawChar(g, PX, this.py, this.skin, { t: ck, fl: this.fl, rot: this.rot, vy: this.vy });
+    { // fire button + charge ring
+      const bx = 56, by = 510, ch = this.fire.charges, ready = ch >= 1;
+      g.fillStyle(0xFF5A1F, ready ? .28 : .08).fillCircle(bx, by, 34); g.lineStyle(3, ready ? 0xFF8A00 : 0x555577, 1).strokeCircle(bx, by, 30);
+      g.fillStyle(ready ? 0xFF5A1F : 0x555577, 1).fillTriangle(bx - 9, by + 8, bx, by - 17, bx + 9, by + 8).fillCircle(bx, by + 7, 10); g.fillStyle(ready ? 0xFFD23F : 0x777799, 1).fillTriangle(bx - 4, by + 8, bx, by - 6, bx + 4, by + 8).fillCircle(bx, by + 8, 5);
+      g.lineStyle(4, 0xFFD23F, .9).beginPath().arc(bx, by, 38, -Math.PI / 2, -Math.PI / 2 + ch / 3 * Math.PI * 2, false).strokePath();
+    }
     this.hudS.setText(String(Math.floor(this.score))); this.hudC.setText('◆ ' + (Save.data.coins + this.coins));
     this.hudD.setText(Difficulty.name(this.t)).setColor(TIER_COL[Difficulty.tier(this.t)]);
     const m = ScoreManager.multiplier(this.t); this.hudM.setText(m > 1 ? 'x' + m.toFixed(1) : '');
