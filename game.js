@@ -685,6 +685,7 @@ class GameScene extends Phaser.Scene {
     // All state is reset here, so scene.start('Game') restarts cleanly (robots/obstacles/particles included).
     Object.assign(this, { t: 0, clock: 0, off: 0, speed: 330, score: 0, coins: 0, gdir: 1, py: FLOOR - HALF, vy: 0, rot: 0, fl: 1,
       alive: true, parts: [], free: this.free || [], skin: SKINS[Save.data.skin], warning: false });
+    this.t = parseFloat(new URLSearchParams(location.search).get('t')) || 0; // test shortcut: index.html?t=40 starts at 40s
     if (!this.mgr) this.mgr = new EnemySpawnManager(); this.mgr.reset();
     this.aic = { py: this.py, gdir: 1, fx: (...a) => this.pfx(...a), onWarn: (rb, relock) => this.onWarn(rb, relock), onPass: rb => this.onPass(rb) };
     this.cameras.main.fadeIn(200); makeTextures(this);
